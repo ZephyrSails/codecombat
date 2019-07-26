@@ -1,7 +1,9 @@
+createjs = require 'lib/createjs-parts'
+
 module.exports = class DebugDisplay extends createjs.Container
   layerPriority: 20
   subscriptions:
-    'level-set-debug': 'onSetDebug'
+    'level:set-debug': 'onSetDebug'
 
   constructor: (options) ->
     super()

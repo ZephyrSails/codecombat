@@ -7,7 +7,8 @@ describe 'LevelEditView', ->
     it 'opens just one modal when you click it', ->
       view = new LevelEditView({}, 'something')
       request = jasmine.Ajax.requests.first()
-      request.response {status: 200, responseText: JSON.stringify(emptyLevel)}
+      request.respondWith {status: 200, responseText: JSON.stringify(emptyLevel)}
+      me.set('anonymous', false) # otherwise button may be disabled an not fire
       view.render()
       spyOn(view, 'openModalView')
       view.$el.find('#revert-button').click()

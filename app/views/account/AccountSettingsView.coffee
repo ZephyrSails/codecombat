@@ -1,76 +1,48 @@
-RootView = require 'views/kinds/RootView'
-template = require 'templates/account/settings'
-{me} = require 'lib/auth'
-forms = require 'lib/forms'
+require('app/styles/account/account-settings-view.sass')
+CocoView = require 'views/core/CocoView'
+template = require 'templates/account/account-settings-view'
+forms = require 'core/forms'
 User = require 'models/User'
-AuthModal = require 'views/modal/AuthModal'
+ConfirmModal = require 'views/core/ConfirmModal'
+{logoutUser, me} = require('core/auth')
 
-WizardSettingsView = require './WizardSettingsView'
-JobProfileTreemaView = require './JobProfileTreemaView'
-
-module.exports = class AccountSettingsView extends RootView
+module.exports = class AccountSettingsView extends CocoView
   id: 'account-settings-view'
   template: template
-  changedFields: [] # DOM input fields
+  className: 'countainer-fluid'
 
   events:
-    'click #save-button': 'save'
-    'change #settings-panes input:checkbox': (e) -> @trigger 'checkboxToggled', e
-    'keyup #settings-panes input:text, #settings-panes input:password': (e) -> @trigger 'inputChanged', e
-    'keyup #name': 'onNameChange'
-    'click #toggle-all-button': 'toggleEmailSubscriptions'
-    'keypress #settings-panes': 'onKeyPress'
+    'change .panel input': 'onChangePanelInput'
+    'change #name-input': 'onChangeNameInput'
+    'click #toggle-all-btn': 'onClickToggleAllButton'
+    'click #delete-account-btn': 'onClickDeleteAccountButton'
+    'click #reset-progress-btn': 'onClickResetProgressButton'
+    'click .resend-verification-email': 'onClickResendVerificationEmail'
 
-  constructor: (options) ->
-    @save =  _.debounce(@save, 200)
-    @onNameChange = _.debounce @checkNameExists, 500
-    super options
-    return unless me
+  initialize: ->
+    @uploadFilePath = "db/user/#{me.id}"
+    @user = new User({_id: me.id})
+    @supermodel.trackRequest(@user.fetch()) # use separate, fresh User object instead of `me`
 
-    @listenTo(me, 'invalid', (errors) -> forms.applyErrorsToForm(@$el, me.validationError))
-    @on 'checkboxToggled', @onToggle
-    @on 'checkboxToggled', @onInputChanged
-    @on 'inputChanged', @onInputChanged
-    @on 'enterPressed', @onEnter
+  getEmailSubsDict: ->
+    subs = {}
+    subs[sub] = 1 for sub in @user.getEnabledEmails()
+    return subs
 
-  onInputChanged: (e) ->
-    return @enableSaveButton() unless e?.currentTarget
-    that = e.currentTarget
-    $that = $(that)
-    savedValue = $that.data 'saved-value'
-    currentValue = $that.val()
-    if savedValue isnt currentValue
-      @changedFields.push that unless that in @changedFields
-      @enableSaveButton()
-    else
-      _.pull @changedFields, that
-      @disableSaveButton() if _.isEmpty @changedFields
+  #- Form input callbacks
+  onChangePanelInput: (e) ->
+    return if $(e.target).closest('.form').attr('id') in ['reset-progress-form', 'delete-account-form']
+    $(e.target).addClass 'changed'
+    @trigger 'input-changed'
 
-  onToggle: (e) ->
-    $that = $(e.currentTarget)
-    $that.val $that[0].checked
+  onClickToggleAllButton: ->
+    subs = @getSubscriptions()
+    $('#email-panel input[type="checkbox"]', @$el).prop('checked', not _.any(_.values(subs))).addClass('changed')
+    @trigger 'input-changed'
 
-  onEnter: ->
-    @save()
-
-  onKeyPress: (e) ->
-    @trigger 'enterPressed', e if e.which is 13
-
-  enableSaveButton: ->
-    $('#save-button', @$el).removeClass 'disabled'
-    $('#save-button', @$el).removeClass 'btn-danger'
-    $('#save-button', @$el).removeAttr 'disabled'
-    $('#save-button', @$el).text 'Save'
-
-  disableSaveButton: ->
-    $('#save-button', @$el).addClass 'disabled'
-    $('#save-button', @$el).removeClass 'btn-danger'
-    $('#save-button', @$el).attr 'disabled', "true"
-    $('#save-button', @$el).text 'No Changes'
-
-  checkNameExists: =>
-    name = $('#name', @$el).val()
-    return if name is me.get 'name'
+  onChangeNameInput: ->
+    name = $('#name-input', @$el).val()
+    return if name is @user.get 'name'
     User.getUnconflictedName name, (newName) =>
       forms.clearFormAlerts(@$el)
       if name is newName
@@ -79,112 +51,163 @@ module.exports = class AccountSettingsView extends RootView
         @suggestedName = newName
         forms.setErrorToProperty @$el, 'name', "That name is taken! How about #{newName}?", true
 
-  afterRender: ->
-    super()
-    $('#settings-tabs a', @$el).click((e) =>
-      e.preventDefault()
-      $(e.target).tab('show')
+  onClickDeleteAccountButton: (e) ->
+    @validateCredentialsForDestruction @$el.find('#delete-account-form'), =>
+      renderData =
+        title: 'Are you really sure?'
+        body: 'This will completely delete your account. This action CANNOT be undone. Are you entirely sure?'
+        decline: 'Cancel'
+        confirm: 'DELETE Your Account'
+      confirmModal = new ConfirmModal renderData
+      confirmModal.on 'confirm', @deleteAccount, @
+      @openModalView confirmModal
 
-      # make sure errors show up in the general pane, but keep the password pane clean
-      $('#password-pane input').val('')
-      #@save() unless $(e.target).attr('href') is '#password-pane'
-      forms.clearFormAlerts($('#password-pane', @$el))
-    )
+  onClickResetProgressButton: ->
+    @validateCredentialsForDestruction @$el.find('#reset-progress-form'), =>
+      renderData =
+        title: 'Are you really sure?'
+        body: 'This will completely erase your progress: code, levels, achievements, earned gems, and course work. This action CANNOT be undone. Are you entirely sure?'
+        decline: 'Cancel'
+        confirm: 'Erase ALL Progress'
+      confirmModal = new ConfirmModal renderData
+      confirmModal.on 'confirm', @resetProgress, @
+      @openModalView confirmModal
 
-    @chooseTab(location.hash.replace('#', ''))
+  onClickResendVerificationEmail: (e) ->
+    $.post @user.getRequestVerificationEmailURL(), ->
+      link = $(e.currentTarget)
+      link.find('.resend-text').addClass('hide')
+      link.find('.sent-text').removeClass('hide')
 
-    wizardSettingsView = new WizardSettingsView()
-    @listenTo wizardSettingsView, 'change', @enableSaveButton
-    @insertSubView wizardSettingsView
+  validateCredentialsForDestruction: ($form, onSuccess) ->
+    forms.clearFormAlerts($form)
+    enteredEmailOrUsername = $form.find('input[name="emailOrUsername"]').val()
+    enteredPassword = $form.find('input[name="password"]').val()
+    if enteredEmailOrUsername and enteredEmailOrUsername in [@user.get('email'), @user.get('name')]
+      isPasswordCorrect = false
+      toBeDelayed = true
+      $.ajax
+        url: '/auth/login'
+        type: 'POST'
+        data:
+          username: enteredEmailOrUsername
+          password: enteredPassword
+        parse: true
+        error: (error) ->
+          toBeDelayed = false
+          'Bad Error. Can\'t connect to server or something. ' + error
+        success: (response, textStatus, jqXHR) ->
+          toBeDelayed = false
+          return unless jqXHR.status is 200
+          isPasswordCorrect = true
+      callback = =>
+        if toBeDelayed
+          setTimeout callback, 100
+        else
+          if isPasswordCorrect
+            onSuccess()
+          else
+            message = $.i18n.t('account_settings.wrong_password', defaultValue: 'Wrong Password.')
+            err = [message: message, property: 'password', formatted: true]
+            forms.applyErrorsToForm($form, err)
+            $('.nano').nanoScroller({scrollTo: @$el.find('.has-error')})
+      setTimeout callback, 100
+    else
+      message = $.i18n.t('account_settings.wrong_email', defaultValue: 'Wrong Email or Username.')
+      err = [message: message, property: 'emailOrUsername', formatted: true]
+      forms.applyErrorsToForm($form, err)
+      $('.nano').nanoScroller({scrollTo: @$el.find('.has-error')})
 
-    @jobProfileTreemaView = new JobProfileTreemaView()
-    @listenTo @jobProfileTreemaView, 'change', @enableSaveButton
-    @insertSubView @jobProfileTreemaView
-    _.defer => @buildPictureTreema()  # Not sure why, but the Treemas don't fully build without this if you reload the page.
+  deleteAccount: ->
+    $.ajax
+      type: 'DELETE'
+      success: ->
+        noty
+          timeout: 5000
+          text: 'Your account is gone.'
+          type: 'success'
+          layout: 'topCenter'
+        _.delay ->
+          window?.webkit?.messageHandlers?.notification?.postMessage(name: "signOut") if window.application.isIPadApp
+          Backbone.Mediator.publish("auth:logging-out", {})
+          window.tracker?.trackEvent 'Log Out', category:'Homepage' if @id is 'home-view'
+          logoutUser()
+        , 500
+      error: (jqXHR, status, error) ->
+        console.error jqXHR
+        noty
+          timeout: 5000
+          text: "Deleting account failed with error code #{jqXHR.status}"
+          type: 'error'
+          layout: 'topCenter'
+      url: "/db/user/#{@user.id}"
 
-  afterInsert: ->
-    super()
-    $('#email-pane input[type="checkbox"]').on 'change', ->
-      $(@).addClass 'changed'
-    if me.get('anonymous')
-      @openModalView new AuthModal()
-    @updateSavedValues()
+  resetProgress: ->
+    $.ajax
+      type: 'POST'
+      success: =>
+        noty
+          timeout: 5000
+          text: 'Your progress is gone.'
+          type: 'success'
+          layout: 'topCenter'
+        localStorage.clear()
+        @user.fetch cache: false
+        _.delay (-> window.location.reload()), 1000
+      error: (jqXHR, status, error) ->
+        console.error jqXHR
+        noty
+          timeout: 5000
+          text: "Resetting progress failed with error code #{jqXHR.status}"
+          type: 'error'
+          layout: 'topCenter'
+      url: "/db/user/#{@user.id}/reset_progress"
 
-  chooseTab: (category) ->
-    id = "##{category}-pane"
-    pane = $(id, @$el)
-    return @chooseTab('general') unless pane.length or category is 'general'
-    loc = "a[href=#{id}]"
-    $(loc, @$el).tab('show')
-    $('.tab-pane').removeClass('active')
-    pane.addClass('active')
-    @currentTab = category
 
-  getRenderData: ->
-    c = super()
-    return c unless me
-    c.subs = {}
-    c.subs[sub] = 1 for sub in c.me.getEnabledEmails()
-    c.showsJobProfileTab = me.isAdmin() or me.get('jobProfile') or location.hash.search('job-profile-') isnt -1
-    c
+  #- Misc
 
   getSubscriptions: ->
-    inputs = ($(i) for i in $('#email-pane input[type="checkbox"].changed', @$el))
+    inputs = ($(i) for i in $('#email-panel input[type="checkbox"].changed', @$el))
     emailNames = (i.attr('name').replace('email_', '') for i in inputs)
     enableds = (i.prop('checked') for i in inputs)
     _.zipObject emailNames, enableds
 
-  toggleEmailSubscriptions: =>
-    subs = @getSubscriptions()
-    $('#email-pane input[type="checkbox"]', @$el).prop('checked', not _.any(_.values(subs))).addClass('changed')
-    @save()
 
-  buildPictureTreema: ->
-    data = photoURL: me.get('photoURL')
-    data.photoURL = null if data.photoURL?.search('gravatar') isnt -1  # Old style
-    schema = $.extend true, {}, me.schema()
-    schema.properties = _.pick me.schema().properties, 'photoURL'
-    schema.required = ['photoURL']
-    treemaOptions =
-      filePath: "db/user/#{me.id}"
-      schema: schema
-      data: data
-      callbacks: {change: @onPictureChanged}
+  #- Saving changes
 
-    @pictureTreema = @$el.find('#picture-treema').treema treemaOptions
-    @pictureTreema?.build()
-    @pictureTreema?.open()
-    @$el.find('.gravatar-fallback').toggle not me.get 'photoURL'
-
-  onPictureChanged: (e) =>
-    @trigger 'inputChanged', e
-    @$el.find('.gravatar-fallback').toggle not me.get 'photoURL'
-
-  save: (e) ->
+  save: ->
     $('#settings-tabs input').removeClass 'changed'
     forms.clearFormAlerts(@$el)
     @grabData()
-    res = me.validate()
+    res = @user.validate()
     if res?
       console.error 'Couldn\'t save because of validation errors:', res
       forms.applyErrorsToForm(@$el, res)
+      $('.nano').nanoScroller({scrollTo: @$el.find('.has-error')})
       return
 
-    return unless me.hasLocalChanges()
+    return unless @user.hasLocalChanges()
 
-    res = me.patch()
+    res = @user.patch()
     return unless res
-    save = $('#save-button', @$el).text($.i18n.t('common.saving', defaultValue: 'Saving...'))
-      .removeClass('btn-danger').addClass('btn-success').show()
 
-    res.error ->
-      errors = JSON.parse(res.responseText)
-      forms.applyErrorsToForm(@$el, errors)
-      save.text($.i18n.t('account_settings.error_saving', defaultValue: 'Error Saving')).removeClass('btn-success').addClass('btn-danger', 500)
+    res.error =>
+      if res.responseJSON?.property
+        errors = res.responseJSON
+        forms.applyErrorsToForm(@$el, errors)
+        $('.nano').nanoScroller({scrollTo: @$el.find('.has-error')})
+      else
+        noty
+          text: res.responseJSON?.message or res.responseText
+          type: 'error'
+          layout: 'topCenter'
+          timeout: 5000
+      @trigger 'save-user-error'
     res.success (model, response, options) =>
-      @changedFields = []
-      @updateSavedValues()
-      save.text($.i18n.t('account_settings.saved', defaultValue: 'Changes Saved')).removeClass('btn-success', 500).attr('disabled', 'true')
+      me.set(model) # save changes to me
+      @trigger 'save-user-success'
+
+    @trigger 'save-user-began'
 
   grabData: ->
     @grabPasswordData()
@@ -198,39 +221,32 @@ module.exports = class AccountSettingsView extends RootView
       message = $.i18n.t('account_settings.password_mismatch', defaultValue: 'Password does not match.')
       err = [message: message, property: 'password2', formatted: true]
       forms.applyErrorsToForm(@$el, err)
+      $('.nano').nanoScroller({scrollTo: @$el.find('.has-error')})
       return
     if bothThere
-      me.set('password', password1)
+      @user.set('password', password1)
     else if password1
       message = $.i18n.t('account_settings.password_repeat', defaultValue: 'Please repeat your password.')
       err = [message: message, property: 'password2', formatted: true]
       forms.applyErrorsToForm(@$el, err)
+      $('.nano').nanoScroller({scrollTo: @$el.find('.has-error')})
 
   grabOtherData: ->
-    $('#name', @$el).val @suggestedName if @suggestedName
-    me.set 'name', $('#name', @$el).val()
-    me.set 'email', $('#email', @$el).val()
+    @$el.find('#name-input').val @suggestedName if @suggestedName
+    @user.set 'name', @$el.find('#name-input').val()
+    @user.set 'firstName', @$el.find('#first-name-input').val()
+    @user.set 'lastName', @$el.find('#last-name-input').val()
+    @user.set 'email', @$el.find('#email').val()
     for emailName, enabled of @getSubscriptions()
-      me.setEmailSubscription emailName, enabled
-    me.set 'photoURL', @pictureTreema.get('/photoURL')
+      @user.setEmailSubscription emailName, enabled
 
-    adminCheckbox = @$el.find('#admin')
-    if adminCheckbox.length
-      permissions = []
-      permissions.push 'admin' if adminCheckbox.prop('checked')
-      me.set('permissions', permissions)
+    permissions = []
 
-    jobProfile = me.get('jobProfile') ? {}
-    updated = false
-    for key, val of @jobProfileTreemaView.getData()
-      updated = updated or not _.isEqual jobProfile[key], val
-      jobProfile[key] = val
-    if updated
-      jobProfile.updated = (new Date()).toISOString()
-      me.set 'jobProfile', jobProfile
-
-  updateSavedValues: ->
-    $('#settings-panes input:text').each ->
-      $(@).data 'saved-value', $(@).val()
-    $('#settings-panes input:checkbox').each ->
-      $(@).data 'saved-value', JSON.stringify $(@)[0].checked
+    unless application.isProduction()
+      adminCheckbox = @$el.find('#admin')
+      if adminCheckbox.length
+        permissions.push 'admin' if adminCheckbox.prop('checked')
+      godmodeCheckbox = @$el.find('#godmode')
+      if godmodeCheckbox.length
+        permissions.push 'godmode' if godmodeCheckbox.prop('checked')
+      @user.set('permissions', permissions)

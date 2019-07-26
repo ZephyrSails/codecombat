@@ -1,8 +1,9 @@
-ModalView = require 'views/kinds/ModalView'
+require('app/styles/editor/level/component/new.sass')
+ModalView = require 'views/core/ModalView'
 template = require 'templates/editor/level/component/new'
 LevelComponent = require 'models/LevelComponent'
-forms = require 'lib/forms'
-{me} = require 'lib/auth'
+forms = require 'core/forms'
+{me} = require 'core/auth'
 
 module.exports = class NewLevelComponentModal extends ModalView
   id: 'editor-level-component-new-modal'
@@ -13,12 +14,11 @@ module.exports = class NewLevelComponentModal extends ModalView
   events:
     'click #new-level-component-submit': 'makeNewLevelComponent'
     'submit form': 'makeNewLevelComponent'
-    
-  getRenderData: ->
-    c = super()
-    c.systems = LevelComponent.schema.properties.system.enum
-    c
-    
+
+  constructor: (options) ->
+    super options
+    @systems = LevelComponent.schema.properties.system.enum
+
   makeNewLevelComponent: (e) ->
     e.preventDefault()
     system = @$el.find('#level-component-system').val()
@@ -26,9 +26,9 @@ module.exports = class NewLevelComponentModal extends ModalView
     component = new LevelComponent()
     component.set 'system', system
     component.set 'name', name
-    component.set 'code', component.get('code').replace(/AttacksSelf/g, name)
+    component.set 'code', component.get('code', true).replace(/AttacksSelf/g, name)
     component.set 'permissions', [{access: 'owner', target: me.id}]  # Private until saved in a published Level
-    res = component.save()
+    res = component.save(null, {type: 'POST'})  # Override PUT so we can trigger postFirstVersion logic
     return unless res
 
     @showLoading()
@@ -38,5 +38,4 @@ module.exports = class NewLevelComponentModal extends ModalView
       forms.applyErrorsToForm(@$el, JSON.parse(res.responseText))
     res.success =>
       @supermodel.registerModel component
-      Backbone.Mediator.publish 'edit-level-component', original: component.get('_id'), majorVersion: 0
       @hide()

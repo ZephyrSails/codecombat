@@ -1,6 +1,7 @@
-CocoView = require 'views/kinds/CocoView'
+require('app/styles/play/level/chat.sass')
+CocoView = require 'views/core/CocoView'
 template = require 'templates/play/level/chat'
-{me} = require 'lib/auth'
+{me} = require 'core/auth'
 LevelBus = require 'lib/LevelBus'
 
 module.exports = class LevelChatView extends CocoView
@@ -18,6 +19,7 @@ module.exports = class LevelChatView extends CocoView
   constructor: (options) ->
     @levelID = options.levelID
     @session = options.session
+    # TODO: we took out session.multiplayer, so this will not fire. If we want to resurrect it, we'll of course need a new way of activating chat.
     @listenTo(@session, 'change:multiplayer', @updateMultiplayerVisibility)
     @sessionID = options.sessionID
     @bus = LevelBus.get(@levelID, @sessionID)
@@ -27,7 +29,10 @@ module.exports = class LevelChatView extends CocoView
 
   updateMultiplayerVisibility: ->
     return unless @$el?
-    @$el.toggle Boolean @session.get('multiplayer')
+    try
+      @$el.toggle Boolean @session.get('multiplayer')
+    catch e
+      console.error "Couldn't toggle the style on the LevelChatView to #{Boolean @session.get('multiplayer')} because of an error:", e
 
   afterRender: ->
     @chatTables = $('table', @$el)
@@ -51,7 +56,7 @@ module.exports = class LevelChatView extends CocoView
     @playNoise() if e.message.authorID isnt me.id
 
   playNoise: ->
-    Backbone.Mediator.publish 'play-sound', trigger: 'chat_received'
+    @playSound 'chat_received'
 
   messageObjectToJQuery: (message) ->
     td = $('<td></td>')

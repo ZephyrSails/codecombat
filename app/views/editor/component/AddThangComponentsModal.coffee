@@ -1,4 +1,5 @@
-ModalView = require 'views/kinds/ModalView'
+require('app/styles/editor/component/add-thang-components-modal.sass')
+ModalView = require 'views/core/ModalView'
 template = require 'templates/editor/component/add-thang-components-modal'
 CocoCollection = require 'collections/CocoCollection'
 LevelComponent = require 'models/LevelComponent'

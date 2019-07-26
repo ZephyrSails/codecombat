@@ -1,4 +1,5 @@
-CocoView = require 'views/kinds/CocoView'
+require('app/styles/play/level/gold.sass')
+CocoView = require 'views/core/CocoView'
 template = require 'templates/play/level/gold'
 teamTemplate = require 'templates/play/level/team_gold'
 
@@ -8,14 +9,14 @@ module.exports = class LevelGoldView extends CocoView
 
   subscriptions:
     'surface:gold-changed': 'onGoldChanged'
-    'level-set-letterbox': 'onSetLetterbox'
+    'level:set-letterbox': 'onSetLetterbox'
 
   constructor: (options) ->
     super options
     @teamGold = {}
     @teamGoldEarned = {}
     @shownOnce = false
-    
+
   onGoldChanged: (e) ->
     return if @teamGold[e.team] is e.gold and @teamGoldEarned[e.team] is e.goldEarned
     @teamGold[e.team] = e.gold

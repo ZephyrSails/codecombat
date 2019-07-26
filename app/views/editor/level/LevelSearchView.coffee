@@ -1,4 +1,4 @@
-SearchView = require 'views/kinds/SearchView'
+SearchView = require 'views/common/SearchView'
 
 module.exports = class LevelSearchView extends SearchView
   id: 'editor-level-home-view'
@@ -6,6 +6,8 @@ module.exports = class LevelSearchView extends SearchView
   model: require 'models/Level'
   modelURL: '/db/level'
   tableTemplate: require 'templates/editor/level/table'
+  projection: ['slug', 'name', 'description', 'version', 'watchers', 'creator']
+  page: 'level'
 
   getRenderData: ->
     context = super()
@@ -14,4 +16,5 @@ module.exports = class LevelSearchView extends SearchView
     context.currentNewSignup = 'editor.new_level_title_login'
     context.currentSearch = 'editor.level_search_title'
     @$el.i18n()
+    @applyRTLIfNeeded()
     context

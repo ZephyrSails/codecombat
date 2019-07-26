@@ -1,30 +1,8 @@
-RootView = require 'views/kinds/RootView'
-template = require 'templates/admin/clas'
+RootComponent = require 'views/core/RootComponent'
+template = require 'templates/base-flat'
+CLAsComponent = require('./CLAsComponent.vue').default
 
-module.exports = class CLAsView extends RootView
+module.exports = class CLAsView extends RootComponent
   id: 'admin-clas-view'
   template: template
-  startsLoading: true
-
-  constructor: (options) ->
-    super options
-    @getCLAs()
-
-  getCLAs: ->
-    CLACollection = Backbone.Collection.extend({
-      url: '/db/cla.submissions'
-    })
-    @clas = new CLACollection()
-    @clas.fetch()
-    @listenTo(@clas, 'sync', @onCLAsLoaded)
-
-  onCLAsLoaded: ->
-    @startsLoading = false
-    @render()
-
-  getRenderData: ->
-    c = super()
-    c.clas = []
-    unless @startsLoading
-      c.clas = _.uniq (_.sortBy (cla.attributes for cla in @clas.models), (m) -> m.githubUsername?.toLowerCase()), 'githubUsername'
-    c
+  VueComponent: CLAsComponent

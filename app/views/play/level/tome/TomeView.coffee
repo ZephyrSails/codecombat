@@ -1,42 +1,31 @@
+require('app/styles/play/level/tome/tome.sass')
 # There's one TomeView per Level. It has:
 # - a CastButtonView, which has
 #   - a cast button
-#   - an autocast settings options button
-# - for each spell (programmableMethod):
+#   - a submit/done button
+# - for each spell (programmableMethod) (which is now just always only 'plan')
 #   - a Spell, which has
-#     - a list of Thangs that share that Spell, with one aether per Thang per Spell
+#     - a Thang that uses that Spell, with an aether and a castAether
 #     - a SpellView, which has
 #       - tons of stuff; the meat
-# - a SpellListView, which has
-#   - for each spell:
-#     - a SpellListEntryView, which has
-#       - icons for each Thang
-#       - the spell name
-#       - a reload button
-#       - documentation for that method (in a popover)
+#     - a SpellTopBarView, which has some controls
 # - a SpellPaletteView, which has
 #   - for each programmableProperty:
 #     - a SpellPaletteEntryView
 #
-# The CastButtonView and SpellListView always show.
+# The CastButtonView always shows.
 # The SpellPaletteView shows the entries for the currently selected Programmable Thang.
 # The SpellView shows the code and runtime state for the currently selected Spell and, specifically, Thang.
-# The SpellView obscures most of the SpellListView when present. We might mess with this.
 # You can switch a SpellView to showing the runtime state of another Thang sharing that Spell.
 # SpellPaletteViews are destroyed and recreated whenever you switch Thangs.
-# The SpellListView shows spells to which your team has read or readwrite access.
-# It doubles as a Thang selector, since it's there when nothing is selected.
 
-CocoView = require 'views/kinds/CocoView'
+CocoView = require 'views/core/CocoView'
 template = require 'templates/play/level/tome/tome'
-{me} = require 'lib/auth'
+{me} = require 'core/auth'
 Spell = require './Spell'
-SpellListView = require './SpellListView'
-ThangListView = require './ThangListView'
 SpellPaletteView = require './SpellPaletteView'
 CastButtonView = require './CastButtonView'
-
-window.SHIM_WORKER_PATH = '/javascripts/workers/catiline_worker_shim.js'
+utils = require 'core/utils'
 
 module.exports = class TomeView extends CocoView
   id: 'tome-view'
@@ -47,24 +36,29 @@ module.exports = class TomeView extends CocoView
   subscriptions:
     'tome:spell-loaded': 'onSpellLoaded'
     'tome:cast-spell': 'onCastSpell'
-    'tome:toggle-spell-list': 'onToggleSpellList'
     'tome:change-language': 'updateLanguageForAllSpells'
     'surface:sprite-selected': 'onSpriteSelected'
     'god:new-world-created': 'onNewWorld'
     'tome:comment-my-code': 'onCommentMyCode'
+    'tome:select-primary-sprite': 'onSelectPrimarySprite'
 
   events:
-    'click #spell-view': 'onSpellViewClick'
     'click': 'onClick'
+
+  constructor: (options) ->
+    super options
+    unless options.god or options.level.get('type') is 'web-dev'
+      console.error "TomeView created with no God!"
 
   afterRender: ->
     super()
     @worker = @createWorker()
-    programmableThangs = _.filter @options.thangs, 'isProgrammable'
-    @createSpells programmableThangs, programmableThangs[0]?.world  # Do before spellList, thangList, and castButton
-    @spellList = @insertSubView new SpellListView spells: @spells, supermodel: @supermodel
-    @thangList = @insertSubView new ThangListView spells: @spells, thangs: @options.thangs, supermodel: @supermodel
-    @castButton = @insertSubView new CastButtonView spells: @spells, levelID: @options.levelID
+    programmableThangs = _.filter @options.thangs, (t) -> t.isProgrammable and t.programmableMethods
+    if @options.level.isType('web-dev')
+      if @fakeProgrammableThang = @createFakeProgrammableThang()
+        programmableThangs = [@fakeProgrammableThang]
+    @createSpells programmableThangs, programmableThangs[0]?.world  # Do before castButton
+    @castButton = @insertSubView new CastButtonView spells: @spells, level: @options.level, session: @options.session, god: @options.god
     @teamSpellMap = @generateTeamSpellMap(@spells)
     unless programmableThangs.length
       @cast()
@@ -74,21 +68,20 @@ module.exports = class TomeView extends CocoView
     delete @options.thangs
 
   onNewWorld: (e) ->
-    thangs = _.filter e.world.thangs, 'inThangList'
-    programmableThangs = _.filter thangs, 'isProgrammable'
+    programmableThangs = _.filter e.thangs, (t) -> t.isProgrammable and t.programmableMethods and t.inThangList
     @createSpells programmableThangs, e.world
-    @thangList.adjustThangs @spells, thangs
-    @spellList.adjustSpells @spells
 
   onCommentMyCode: (e) ->
     for spellKey, spell of @spells when spell.canWrite()
       console.log 'Commenting out', spellKey
-      commentedSource = 'return;  // Commented out to stop infinite loop.\n' + spell.getSource()
+      commentedSource = spell.view.commentOutMyCode() + 'Commented out to stop infinite loop.\n' + spell.getSource()
       spell.view.updateACEText commentedSource
       spell.view.recompile false
     @cast()
 
   createWorker: ->
+    return null unless Worker?
+    return null if window.application.isIPadApp  # Save memory!
     return new Worker('/javascripts/workers/aether_worker.js')
 
   generateTeamSpellMap: (spellObject) ->
@@ -106,7 +99,7 @@ module.exports = class TomeView extends CocoView
     return teamSpellMap
 
   createSpells: (programmableThangs, world) ->
-    language = @options.session.get('codeLanguage') ? me.get('aceConfig')?.language ? 'javascript'
+    language = @options.session.get('codeLanguage') ? me.get('aceConfig')?.language ? 'python'
     pathPrefixComponents = ['play', 'level', @options.levelID, @options.session.id, 'code']
     @spells ?= {}
     @thangSpells ?= {}
@@ -115,115 +108,148 @@ module.exports = class TomeView extends CocoView
       @thangSpells[thang.id] = []
       for methodName, method of thang.programmableMethods
         pathComponents = [thang.id, methodName]
-        if method.cloneOf
-          pathComponents[0] = method.cloneOf  # referencing another Thang's method
         pathComponents[0] = _.string.slugify pathComponents[0]
         spellKey = pathComponents.join '/'
         @thangSpells[thang.id].push spellKey
-        unless method.cloneOf
-          skipProtectAPI = @getQueryVariable 'skip_protect_api', (@options.levelID in ['gridmancer', 'minimax-tic-tac-toe'])
-          spell = @spells[spellKey] = new Spell
-            programmableMethod: method
-            spellKey: spellKey
-            pathComponents: pathPrefixComponents.concat(pathComponents)
-            session: @options.session
-            otherSession: @options.otherSession
-            supermodel: @supermodel
-            skipProtectAPI: skipProtectAPI
-            worker: @worker
-            language: language
-            spectateView: @options.spectateView
-            levelID: @options.levelID
+        skipProtectAPI = utils.getQueryVariable 'skip_protect_api', false
+        spell = @spells[spellKey] = new Spell
+          hintsState: @options.hintsState
+          programmableMethod: method
+          spellKey: spellKey
+          pathComponents: pathPrefixComponents.concat(pathComponents)
+          session: @options.session
+          otherSession: @options.otherSession
+          supermodel: @supermodel
+          skipProtectAPI: skipProtectAPI
+          worker: @worker
+          language: language
+          spectateView: @options.spectateView
+          spectateOpponentCodeLanguage: @options.spectateOpponentCodeLanguage
+          observing: @options.observing
+          levelID: @options.levelID
+          level: @options.level
+          god: @options.god
+          courseID: @options.courseID
+          courseInstanceID: @options.courseInstanceID
 
     for thangID, spellKeys of @thangSpells
-      thang = world.getThangByID thangID
+      thang = @fakeProgrammableThang ? world.getThangByID thangID
       if thang
         @spells[spellKey].addThang thang for spellKey in spellKeys
       else
         delete @thangSpells[thangID]
         spell.removeThangID thangID for spell in @spells
+    for spellKey, spell of @spells when not spell.canRead()  # Make sure these get transpiled (they have no views).
+      spell.transpile()
+      spell.loaded = true
     null
 
   onSpellLoaded: (e) ->
     for spellID, spell of @spells
       return unless spell.loaded
-    @cast()
+    justBegin = @options.level.isType('game-dev')
+    @cast false, false, justBegin
 
   onCastSpell: (e) ->
     # A single spell is cast.
-    # Hmm; do we need to make sure other spells are all cast here?
-    @cast e?.preload
+    @cast e?.preload, e?.realTime, e?.justBegin, e?.cinematic
 
-  cast: (preload=false) ->
-    Backbone.Mediator.publish 'tome:cast-spells', spells: @spells, preload: preload
-
-  onToggleSpellList: (e) ->
-    @spellList.rerenderEntries()
-    @spellList.$el.toggle()
-
-  onSpellViewClick: (e) ->
-    @spellList.$el.hide()
+  cast: (preload=false, realTime=false, justBegin=false, cinematic=false) ->
+    return if @options.level.isType('web-dev')
+    sessionState = @options.session.get('state') ? {}
+    if realTime
+      sessionState.submissionCount = (sessionState.submissionCount ? 0) + 1
+      sessionState.flagHistory = _.filter sessionState.flagHistory ? [], (event) => event.team isnt (@options.session.get('team') ? 'humans')
+      sessionState.lastUnsuccessfulSubmissionTime = new Date() if @options.level.get 'replayable'
+      @options.session.set 'state', sessionState
+    difficulty = sessionState.difficulty ? 0
+    if @options.observing
+      difficulty = Math.max 0, difficulty - 1  # Show the difficulty they won, not the next one.
+    Backbone.Mediator.publish 'level:set-playing', {playing: false}
+    Backbone.Mediator.publish 'tome:cast-spells', {
+      @spells,
+      preload,
+      realTime,
+      synchronous: @options.level.isType('game-dev') and not justBegin,
+      justBegin,
+      cinematic,
+      difficulty,
+      submissionCount: sessionState.submissionCount ? 0,
+      flagHistory: sessionState.flagHistory ? [],
+      god: @options.god,
+      fixedSeed: @options.fixedSeed,
+      keyValueDb: @options.session.get('keyValueDb') ? {}
+    }
 
   onClick: (e) ->
-    Backbone.Mediator.publish 'tome:focus-editor' unless $(e.target).parents('.popover').length
-
-  clearSpellView: ->
-    @spellView?.dismiss()
-    @spellView?.$el.after('<div id="' + @spellView.id + '"></div>').detach()
-    @spellView = null
-    @spellTabView?.$el.after('<div id="' + @spellTabView.id + '"></div>').detach()
-    @spellTabView = null
-    @removeSubView @spellPaletteView if @spellPaletteView
-    @spellPaletteView = null
-    @castButton?.$el.hide()
-    @thangList?.$el.show()
+    Backbone.Mediator.publish 'tome:focus-editor', {} unless $(e.target).parents('.popover').length
 
   onSpriteSelected: (e) ->
-    thang = e.thang
-    spellName = e.spellName
-    @spellList?.$el.hide()
-    return @clearSpellView() unless thang
-    spell = @spellFor thang, spellName
-    unless spell?.canRead()
-      @clearSpellView()
-      @updateSpellPalette thang, spell
-      return
+    return if @spellView and @options.level.get('type', true) in ['hero', 'hero-ladder', 'hero-coop', 'course', 'course-ladder', 'game-dev', 'web-dev']  # Never deselect the hero in the Tome.
+    spell = @spellFor e.thang, e.spellName
+    if spell?.canRead()
+      @setSpellView spell, e.thang
+
+  setSpellView: (spell, thang) ->
     unless spell.view is @spellView
-      @clearSpellView()
       @spellView = spell.view
-      @spellTabView = spell.tabView
+      @spellTopBarView = spell.topBarView
       @$el.find('#' + @spellView.id).after(@spellView.el).remove()
-      @$el.find('#' + @spellTabView.id).after(@spellTabView.el).remove()
-      @castButton.attachTo @spellView
-      @thangList.$el.hide()
-      Backbone.Mediator.publish 'tome:spell-shown', thang: thang, spell: spell
-    @spellList.setThangAndSpell thang, spell
-    @spellView?.setThang thang
-    @spellTabView?.setThang thang
+      @$el.find('#' + @spellTopBarView.id).after(@spellTopBarView.el).remove()
+      @castButton?.attachTo @spellView
     @updateSpellPalette thang, spell
+    @spellView?.setThang thang
 
   updateSpellPalette: (thang, spell) ->
-    return unless thang and @spellPaletteView?.thang isnt thang and thang.programmableProperties or thang.apiProperties
-    @spellPaletteView = @insertSubView new SpellPaletteView thang: thang, supermodel: @supermodel, programmable: spell?.canRead(), language: spell?.language ? @options.session.get('codeLanguage'), session: @options.session
-    @spellPaletteView.toggleControls {}, spell.view.controlsEnabled if spell   # TODO: know when palette should have been disabled but didn't exist
+    @options.playLevelView.updateSpellPalette thang, spell
 
   spellFor: (thang, spellName) ->
     return null unless thang?.isProgrammable
+    return unless @thangSpells[thang.id]  # Probably in streaming mode, where we don't update until it's done.
     selectedThangSpells = (@spells[spellKey] for spellKey in @thangSpells[thang.id])
     if spellName
       spell = _.find selectedThangSpells, {name: spellName}
     else
-      spell = @thangList.topSpellForThang thang
-      #spell = selectedThangSpells[0]  # TODO: remember last selected spell for this thang
+      spell = _.find selectedThangSpells, (spell) -> spell.canWrite()
+      spell ?= _.find selectedThangSpells, (spell) -> spell.canRead()
     spell
 
   reloadAllCode: ->
-    spell.view.reloadCode false for spellKey, spell of @spells when spell.team is me.team or (spell.team in ['common', 'neutral', null])
-    Backbone.Mediator.publish 'tome:cast-spells', spells: @spells, preload: false
+    if utils.getQueryVariable 'dev'
+      @options.playLevelView.spellPaletteView.destroy()
+      @updateSpellPalette @spellView.thang, @spellView.spell
+    spell.view.reloadCode false for spellKey, spell of @spells when spell.view and (spell.team is me.team or (spell.team in ['common', 'neutral', null]))
+    @cast false, false
 
   updateLanguageForAllSpells: (e) ->
     spell.updateLanguageAether e.language for spellKey, spell of @spells when spell.canWrite()
-    @cast()
+    if e.reload
+      @reloadAllCode()
+    else
+      @cast()
+
+  onSelectPrimarySprite: (e) ->
+    if @options.level.isType('web-dev')
+      @setSpellView @spells['hero-placeholder/plan'], @fakeProgrammableThang
+      return
+    # This is fired by PlayLevelView
+    if @options.session.get('team') is 'ogres'
+      Backbone.Mediator.publish 'level:select-sprite', thangID: 'Hero Placeholder 1'
+    else
+      Backbone.Mediator.publish 'level:select-sprite', thangID: 'Hero Placeholder'
+
+  createFakeProgrammableThang: ->
+    return null unless hero = _.find @options.level.get('thangs'), id: 'Hero Placeholder'
+    return null unless programmableConfig = _.find(hero.components, (component) -> component.config?.programmableMethods).config
+    usesHTMLConfig = _.find(hero.components, (component) -> component.config?.programmableHTMLProperties).config
+    usesWebJavaScriptConfig = _.find(hero.components, (component) -> component.config?.programmableWebJavaScriptProperties)?.config
+    usesJQueryConfig = _.find(hero.components, (component) -> component.config?.programmableJQueryProperties)?.config
+    console.warn "Couldn't find usesHTML config; is it presented and not defaulted on the Hero Placeholder?" unless usesHTMLConfig
+    thang =
+      id: 'Hero Placeholder'
+      isProgrammable: true
+    thang = _.merge thang, programmableConfig, usesHTMLConfig, usesWebJavaScriptConfig, usesJQueryConfig
+    thang
 
   destroy: ->
     spell.destroy() for spellKey, spell of @spells

@@ -1,70 +1,157 @@
-RootView = require 'views/kinds/RootView'
-template = require 'templates/home'
-WizardSprite = require 'lib/surface/WizardSprite'
-ThangType = require 'models/ThangType'
-Simulator = require 'lib/simulator/Simulator'
-{me} = require '/lib/auth'
+require('app/styles/home-view.sass')
+RootView = require 'views/core/RootView'
+template = require 'templates/home-view'
+CocoCollection = require 'collections/CocoCollection'
+TrialRequest = require 'models/TrialRequest'
+TrialRequests = require 'collections/TrialRequests'
+Courses = require 'collections/Courses'
+utils = require 'core/utils'
+storage = require 'core/storage'
+{logoutUser, me} = require('core/auth')
+CreateAccountModal = require 'views/core/CreateAccountModal/CreateAccountModal'
 
 module.exports = class HomeView extends RootView
   id: 'home-view'
   template: template
 
   events:
-    'click .code-language': 'onCodeLanguageSelected'
+    'click .continue-playing-btn': 'onClickTrackEvent'
+    'click .example-gd-btn': 'onClickTrackEvent'
+    'click .example-wd-btn': 'onClickTrackEvent'
+    'click .play-btn': 'onClickTrackEvent'
+    'click .signup-home-btn': 'onClickTrackEvent'
+    'click .student-btn': 'onClickStudentButton'
+    'click .teacher-btn': 'onClickTeacherButton'
+    'click .request-quote': 'onClickRequestQuote'
+    'click .logout-btn': 'logoutAccount'
+    'click .profile-btn': 'onClickTrackEvent'
+    'click .setup-class-btn': 'onClickSetupClass'
+    'click .my-classes-btn': 'onClickTrackEvent'
+    'click .my-courses-btn': 'onClickTrackEvent'
+    'click a': 'onClickAnchor'
 
-  constructor: ->
-    super(arguments...)
-    ThangType.loadUniversalWizard()
+  initialize: (options) ->
+    super(options)
 
-  getRenderData: ->
-    c = super()
-    if $.browser
-      majorVersion = $.browser.versionNumber
-      c.isOldBrowser = true if $.browser.mozilla && majorVersion < 21
-      c.isOldBrowser = true if $.browser.chrome && majorVersion < 17
-      c.isOldBrowser = true if $.browser.safari && majorVersion < 6
+    @courses = new Courses()
+    @supermodel.trackRequest @courses.fetchReleased()
+
+    if me.isTeacher()
+      @trialRequests = new TrialRequests()
+      @trialRequests.fetchOwn()
+      @supermodel.loadCollection(@trialRequests)
+
+  getMeta: ->
+    title: $.i18n.t 'new_home.title'
+    meta: [
+        { vmid: 'meta-description', name: 'description', content: $.i18n.t 'new_home.meta_description' }
+    ],
+    link: [
+      { vmid: 'rel-canonical', rel: 'canonical', href: '/'  }
+
+    ]
+
+  onLoaded: ->
+    @trialRequest = @trialRequests.first() if @trialRequests?.size()
+    @isTeacherWithDemo = @trialRequest and @trialRequest.get('status') in ['approved', 'submitted']
+    super()
+
+  onClickRequestQuote: (e) ->
+    @playSound 'menu-button-click'
+    e.preventDefault()
+    e.stopImmediatePropagation()
+    @homePageEvent($(e.target).data('event-action'))
+    if me.isTeacher()
+      application.router.navigate '/teachers/update-account', trigger: true
     else
-      console.warn 'no more jquery browser version...'
-    c.isEnglish = (me.get('preferredLanguage') or 'en').startsWith 'en'
-    c.languageName = me.get('preferredLanguage')
-    c.codeLanguage = (me.get('aceConfig') ? {}).language or 'javascript'
-    c
+      application.router.navigate '/teachers/quote', trigger: true
+
+  onClickSetupClass: (e) ->
+    @homePageEvent($(e.target).data('event-action'))
+    application.router.navigate("/teachers/classes", { trigger: true })
+
+  onClickStudentButton: (e) ->
+    @homePageEvent('Started Signup')
+    @homePageEvent($(e.target).data('event-action'))
+    @openModalView(new CreateAccountModal({startOnPath: 'student'}))
+
+  onClickTeacherButton: (e) ->
+    @homePageEvent('Started Signup')
+    @homePageEvent($(e.target).data('event-action'))
+    @openModalView(new CreateAccountModal({startOnPath: 'teacher'}))
+
+  onClickTrackEvent: (e) ->
+    if $(e.target)?.hasClass('track-ab-result')
+      properties = {trackABResult: true}
+    @homePageEvent($(e.target).data('event-action'), properties || {})
+
+  # Provides a uniform interface for collecting information from the homepage.
+  # Always provides the category Homepage and includes the user role.
+  homePageEvent: (action, extraproperties={}, includeIntegrations=[]) ->
+    defaults =
+      category: 'Homepage'
+      user: me.get('role') || (me.isAnonymous() && "anonymous") || "homeuser"
+    properties = _.merge(defaults, extraproperties)
+
+    window.tracker?.trackEvent(
+        action,
+        properties,
+        includeIntegrations )
+
+  onClickAnchor: (e) ->
+    return unless anchor = e?.currentTarget
+    # Track an event with action of the English version of the link text
+    translationKey = $(anchor).attr('data-i18n')
+    translationKey ?= $(anchor).children('[data-i18n]').attr('data-i18n')
+    if translationKey
+      anchorText = $.i18n.t(translationKey, {lng: 'en-US'})
+    else
+      anchorText = anchor.text
+
+    if $(e.target)?.hasClass('track-ab-result')
+      properties = {trackABResult: true}
+
+    if anchorText
+      @homePageEvent("Link: #{anchorText}", properties || {}, ['Google Analytics'])
+    else
+      _.extend(properties || {}, {
+        clicked: e?.currentTarget?.host or "unknown"
+      })
+      @homePageEvent("Link:", properties, ['Google Analytics'])
 
   afterRender: ->
+    if !me.showChinaVideo()
+      require.ensure(['@vimeo/player'], (require) =>
+        Player = require('@vimeo/player').default
+        @vimeoPlayer = new Player(@$('.vimeo-player')[0])
+      , (e) =>
+        console.error e
+      , 'vimeo')
+
+    if me.isAnonymous()
+      if document.location.hash is '#create-account'
+        @openModalView(new CreateAccountModal())
+      if document.location.hash is '#create-account-individual'
+        @openModalView(new CreateAccountModal({startOnPath: 'individual'}))
+      if document.location.hash is '#create-account-student'
+        @openModalView(new CreateAccountModal({startOnPath: 'student'}))
+      if document.location.hash is '#create-account-teacher'
+        @openModalView(new CreateAccountModal({startOnPath: 'teacher'}))
     super()
-    @$el.find('.modal').on 'shown.bs.modal', ->
-      $('input:visible:first', @).focus()
 
-    # Try to find latest level and set 'Play' link to go to that level
-    lastLevel = me.get('lastLevel')
-    lastLevel ?= localStorage?['lastLevel']  # Temp, until it's migrated to user property
-    if lastLevel
-      playLink = @$el.find('#beginner-campaign')
-      if playLink[0]?
-        href = playLink.attr('href').split('/')
-        href[href.length-1] = lastLevel if href.length isnt 0
-        href = href.join('/')
-        playLink.attr('href', href)
+  afterInsert: ->
+    super()
+    # scroll to the current hash, once everything in the browser is set up
+    f = =>
+      return if @destroyed
+      link = $(document.location.hash)
+      if link.length
+        @scrollToLink(document.location.hash, 0)
+    _.delay(f, 100)
 
-    codeLanguage = (me.get('aceConfig') ? {}).language or 'javascript'
-    @$el.find(".code-language[data-code-language=#{codeLanguage}]").addClass 'selected-language'
-    @updateLanguageLogos codeLanguage
+  logoutAccount: ->
+    Backbone.Mediator.publish("auth:logging-out", {})
+    logoutUser()
 
-  updateLanguageLogos: (codeLanguage) ->
-    @$el.find('.game-mode-wrapper .code-language-logo').css('background-image', "url(/images/common/code_languages/#{codeLanguage}_small.png)")
-
-  onCodeLanguageSelected: (e) ->
-    target = $(e.target).closest('.code-language')
-    codeLanguage = target.data('code-language')
-    @$el.find('.code-language').removeClass 'selected-language'
-    target.addClass 'selected-language'
-    aceConfig = me.get('aceConfig') ? {}
-    return if (aceConfig.language or 'javascript') is codeLanguage
-    aceConfig.language = codeLanguage
-    me.set 'aceConfig', aceConfig
-    me.save()  # me.patch() doesn't work if aceConfig previously existed and we switched just once
-
-    firstButton = @$el.find('#beginner-campaign .game-mode-wrapper').delay(500).addClass('hovered', 500).delay(500).removeClass('hovered', 500)
-    lastButton = @$el.find('#multiplayer .game-mode-wrapper').delay(1000).addClass('hovered', 500).delay(500).removeClass('hovered', 500)
-    $('#page-container').animate {scrollTop: firstButton.offset().top - 100, easing: 'easeInOutCubic'}, 500
-    @updateLanguageLogos codeLanguage
+  mergeWithPrerendered: (el) ->
+    true
